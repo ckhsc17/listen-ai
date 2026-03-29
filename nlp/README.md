@@ -1,6 +1,6 @@
 # NLP Service (FastAPI)
 
-This module performs simple lexicon-based sentiment analysis.
+This module performs simple lexicon-based sentiment analysis for English and Traditional Chinese text.
 
 ## Prerequisites
 
@@ -50,5 +50,11 @@ curl http://localhost:8001/health
 ```bash
 curl -X POST http://localhost:8001/sentiment \
   -H "Content-Type: application/json" \
-  -d '{"texts":["great update","bad experience"]}'
+  -d '{"texts":["great update","bad experience","這次更新很好","體驗很糟"]}'
+```
+
+## Run Unit Tests
+
+```bash
+python -m unittest -v
 ```
