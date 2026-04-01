@@ -1,0 +1,76 @@
+services:
+  stat:
+    build:
+      context: ./stat
+      dockerfile: Dockerfile
+    ports:
+      - "8002:8002"
+    environment:
+      STAT_PORT: "8002"
+      SQLITE_PATH: /data/listenai.db
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8002/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  nlp:
+    build:
+      context: ./nlp
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      NLP_PORT: "8001"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health')",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      GATEWAY_PORT: "8000"
+      STAT_URL: http://stat:8002
+      NLP_URL: http://nlp:8001
+      JWT_SECRET: supersecret
+      DEMO_USER: admin
+      DEMO_PASS: admin123
+    depends_on:
+      stat:
+        condition: service_healthy
+      nlp:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "8501:8501"
+    environment:
+      GATEWAY_URL: http://gateway:8000
+    depends_on:
+      gateway:
+        condition: service_healthy
