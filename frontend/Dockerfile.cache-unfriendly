@@ -1,0 +1,21 @@
+# Intentionally bad layer order: application code before dependency install.
+# Changing app.py invalidates later layers, so pip often re-runs (slow incremental builds).
+# Compare incremental build time after editing only app.py vs the default Dockerfile.
+#
+#   docker build -f Dockerfile.cache-unfriendly -t listen-ai-frontend:bad-order .
+
+FROM python:3.13-slim-bookworm
+
+WORKDIR /app
+
+COPY app.py .
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+ENV STREAMLIT_SERVER_HEADLESS=true
+ENV STREAMLIT_SERVER_PORT=8501
+ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
+
+EXPOSE 8501
+
+CMD ["streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.port=8501"]
