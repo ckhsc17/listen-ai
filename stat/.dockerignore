@@ -1,3 +1,5 @@
 stat
 bin/
 .DS_Store
+*.db
+listenai.db

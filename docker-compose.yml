@@ -1,3 +1,4 @@
+# listenai.db must not be baked into images; persist it via the bind-mounted volume below.
 services:
   stat:
     build:
@@ -9,6 +10,7 @@ services:
       STAT_PORT: "8002"
       SQLITE_PATH: /data/listenai.db
     volumes:
+      # Host directory ./data → /data in container (SQLite file lives on disk, outside image layers).
       - ./data:/data
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8002/health"]

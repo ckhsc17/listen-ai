@@ -17,6 +17,10 @@ WORKDIR /app
 COPY --from=builder /stat ./stat
 
 ENV STAT_PORT=8002
+# Default path inside the container; override with SQLITE_PATH. Persist /data via a volume (see docker-compose).
+ENV SQLITE_PATH=/data/listenai.db
+
+VOLUME ["/data"]
 
 EXPOSE 8002
 

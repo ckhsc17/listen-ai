@@ -317,6 +317,7 @@ func main() {
 	if sqlitePath == "" {
 		sqlitePath = "./listenai.db"
 	}
+	log.Printf("using SQLite database at %s", sqlitePath)
 
 	db, err := sql.Open("sqlite", sqlitePath)
 	if err != nil {
