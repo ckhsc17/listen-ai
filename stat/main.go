@@ -7,14 +7,14 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"regexp"
-	"sort"
 	"strings"
 	"time"
-	"unicode"
 
 	_ "modernc.org/sqlite"
 )
+
+// CurrentNLPVersion must match the lexicon / rules in nlp/app.py when reanalysis is required.
+const CurrentNLPVersion = 1
 
 type Post struct {
 	ID        int    `json:"id"`
@@ -22,6 +22,7 @@ type Post struct {
 	Author    string `json:"author"`
 	Content   string `json:"content"`
 	CreatedAt string `json:"created_at"`
+	Sentiment string `json:"sentiment"`
 }
 
 type StatsRequest struct {
@@ -44,11 +45,13 @@ type TrendPoint struct {
 }
 
 type StatsResponse struct {
-	MentionCount int            `json:"mention_count"`
-	TopKeywords  []KeywordCount `json:"top_keywords"`
-	Trends       []TrendPoint   `json:"trends"`
-	ExamplePosts []Post         `json:"example_posts"`
-	Posts        []Post         `json:"posts"`
+	MentionCount          int                 `json:"mention_count"`
+	TopKeywords           []KeywordCount      `json:"top_keywords"`
+	Trends                []TrendPoint        `json:"trends"`
+	ExamplePosts          []Post              `json:"example_posts"`
+	Posts                 []Post              `json:"posts,omitempty"`
+	SentimentPercentage   map[string]float64  `json:"sentiment_percentage"`
+	TotalAnalyzedPosts    int                 `json:"total_analyzed_posts"`
 }
 
 type InsertPostRequest struct {
@@ -60,13 +63,6 @@ type InsertPostRequest struct {
 
 type InsertPostResponse struct {
 	ID int `json:"id"`
-}
-
-var stopWords = map[string]bool{
-	"the": true, "a": true, "an": true, "and": true, "or": true, "to": true,
-	"of": true, "in": true, "on": true, "for": true, "with": true, "is": true,
-	"are": true, "it": true, "this": true, "that": true, "my": true, "our": true,
-	"your": true, "but": true, "from": true, "at": true, "was": true,
 }
 
 func parseDateRange(fromDate, toDate string) (string, string, error) {
@@ -90,146 +86,40 @@ func parseDateRange(fromDate, toDate string) (string, string, error) {
 	return fromDate, toDate, nil
 }
 
-func containsAny(text string, words []string) bool {
-	if len(words) == 0 {
-		return true
-	}
-	l := strings.ToLower(text)
-	for _, w := range words {
-		w = strings.TrimSpace(strings.ToLower(w))
-		if w == "" {
-			continue
-		}
-		if strings.Contains(l, w) {
-			return true
-		}
-	}
-	return false
-}
-
-func containsNone(text string, words []string) bool {
-	l := strings.ToLower(text)
-	for _, w := range words {
-		w = strings.TrimSpace(strings.ToLower(w))
-		if w == "" {
-			continue
-		}
-		if strings.Contains(l, w) {
-			return false
-		}
-	}
-	return true
-}
-
-func extractTopKeywords(posts []Post, include, exclude []string, topN int) []KeywordCount {
-	re := regexp.MustCompile(`[a-zA-Z']+|[\p{Han}]+`)
-	freq := map[string]int{}
-	excludedMap := map[string]bool{}
-
-	for _, w := range exclude {
-		w = strings.ToLower(strings.TrimSpace(w))
+func filterNonEmptyKeywords(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, w := range in {
+		w = strings.TrimSpace(w)
 		if w != "" {
-			excludedMap[w] = true
+			out = append(out, w)
 		}
 	}
-
-	for _, post := range posts {
-		tokens := extractKeywordTokens(post.Content, re)
-		for _, t := range tokens {
-			if isTooShortKeyword(t) || stopWords[t] || excludedMap[t] {
-				continue
-			}
-			freq[t]++
-		}
-	}
-
-	items := make([]KeywordCount, 0, len(freq))
-	for k, c := range freq {
-		items = append(items, KeywordCount{Keyword: k, Count: c})
-	}
-
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].Count == items[j].Count {
-			return items[i].Keyword < items[j].Keyword
-		}
-		return items[i].Count > items[j].Count
-	})
-
-	if len(items) > topN {
-		items = items[:topN]
-	}
-	return items
+	return out
 }
 
-func extractKeywordTokens(content string, re *regexp.Regexp) []string {
-	matches := re.FindAllString(strings.ToLower(content), -1)
-	tokens := make([]string, 0, len(matches)*2)
-
-	for _, m := range matches {
-		if isHanOnly(m) {
-			tokens = append(tokens, hanBigrams(m)...)
-			continue
-		}
-		tokens = append(tokens, m)
-	}
-
-	return tokens
-}
-
-func isHanOnly(text string) bool {
-	if text == "" {
-		return false
-	}
-	for _, r := range text {
-		if !unicode.Is(unicode.Han, r) {
-			return false
+func filterNonEmptyLower(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, w := range in {
+		w = strings.TrimSpace(strings.ToLower(w))
+		if w != "" {
+			out = append(out, w)
 		}
 	}
-	return true
+	return out
 }
 
-func hanBigrams(text string) []string {
-	runes := []rune(text)
-	if len(runes) < 2 {
-		return nil
+func placeholders(n int) string {
+	if n <= 0 {
+		return ""
 	}
-	if len(runes) == 2 {
-		return []string{text}
-	}
-
-	bigrams := make([]string, 0, len(runes)-1)
-	for i := 0; i < len(runes)-1; i++ {
-		bigrams = append(bigrams, string(runes[i:i+2]))
-	}
-	return bigrams
-}
-
-func isTooShortKeyword(token string) bool {
-	if isHanOnly(token) {
-		return len([]rune(token)) < 2
-	}
-	return len(token) <= 2
-}
-
-func buildTrends(posts []Post) []TrendPoint {
-	counts := map[string]int{}
-	for _, p := range posts {
-		if len(p.CreatedAt) >= 10 {
-			counts[p.CreatedAt[:10]]++
+	b := strings.Builder{}
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteString(",")
 		}
+		b.WriteString("?")
 	}
-
-	keys := make([]string, 0, len(counts))
-	for k := range counts {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	trends := make([]TrendPoint, 0, len(keys))
-	for _, d := range keys {
-		trends = append(trends, TrendPoint{Date: d, Count: counts[d]})
-	}
-	return trends
+	return b.String()
 }
 
 func fetchFilteredPosts(db *sql.DB, req StatsRequest) ([]Post, error) {
@@ -238,47 +128,221 @@ func fetchFilteredPosts(db *sql.DB, req StatsRequest) ([]Post, error) {
 		return nil, err
 	}
 
-	rows, err := db.Query(
-		`SELECT id, platform, author, content, created_at
-		 FROM posts
-		 WHERE date(created_at) BETWEEN date(?) AND date(?)
-		 ORDER BY datetime(created_at) DESC`,
-		fromDate,
-		toDate,
-	)
+	postLimit := req.PostLimit
+	if postLimit <= 0 {
+		postLimit = 500
+	}
+
+	inc := filterNonEmptyKeywords(req.IncludeKeywords)
+	exc := filterNonEmptyKeywords(req.ExcludeKeywords)
+
+	var sb strings.Builder
+	sb.WriteString(`SELECT id, platform, author, content, created_at, COALESCE(sentiment_label, 'neutral')
+		FROM posts
+		WHERE date(created_at) BETWEEN date(?) AND date(?) `)
+	args := []interface{}{fromDate, toDate}
+
+	if len(inc) > 0 {
+		sb.WriteString(` AND (`)
+		for i, kw := range inc {
+			if i > 0 {
+				sb.WriteString(` OR `)
+			}
+			sb.WriteString(`LOWER(content) LIKE ?`)
+			args = append(args, "%"+strings.ToLower(kw)+"%")
+		}
+		sb.WriteString(`)`)
+	}
+
+	for _, kw := range exc {
+		sb.WriteString(` AND LOWER(content) NOT LIKE ?`)
+		args = append(args, "%"+strings.ToLower(kw)+"%")
+	}
+
+	sb.WriteString(` ORDER BY datetime(created_at) DESC LIMIT ?`)
+	args = append(args, postLimit)
+
+	rows, err := db.Query(sb.String(), args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	posts := []Post{}
+	posts := make([]Post, 0, postLimit)
 	for rows.Next() {
 		var p Post
-		if err := rows.Scan(&p.ID, &p.Platform, &p.Author, &p.Content, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Platform, &p.Author, &p.Content, &p.CreatedAt, &p.Sentiment); err != nil {
 			return nil, err
-		}
-
-		if !containsAny(p.Content, req.IncludeKeywords) {
-			continue
-		}
-		if !containsNone(p.Content, req.ExcludeKeywords) {
-			continue
 		}
 		posts = append(posts, p)
 	}
+	return posts, rows.Err()
+}
 
-	if req.PostLimit <= 0 {
-		req.PostLimit = 500
-	}
-	if len(posts) > req.PostLimit {
-		posts = posts[:req.PostLimit]
+func topKeywordsFromDB(db *sql.DB, postIDs []int, excludeKeywords []string, topN int) ([]KeywordCount, error) {
+	if len(postIDs) == 0 {
+		return nil, nil
 	}
 
-	return posts, nil
+	excluded := filterNonEmptyLower(excludeKeywords)
+	excludedMap := map[string]bool{}
+	for _, e := range excluded {
+		excludedMap[e] = true
+	}
+
+	args := make([]interface{}, 0, len(postIDs)+len(excluded)+1)
+	for _, id := range postIDs {
+		args = append(args, id)
+	}
+
+	q := `SELECT token, SUM(cnt) AS s FROM post_tokens WHERE post_id IN (` + placeholders(len(postIDs)) + `)`
+	if len(excluded) > 0 {
+		q += ` AND LOWER(token) NOT IN (` + placeholders(len(excluded)) + `)`
+		for _, e := range excluded {
+			args = append(args, e)
+		}
+	}
+	q += ` GROUP BY token ORDER BY s DESC LIMIT ?`
+	args = append(args, max(50, topN*5))
+
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []KeywordCount
+	for rows.Next() {
+		var tok string
+		var sum int
+		if err := rows.Scan(&tok, &sum); err != nil {
+			return nil, err
+		}
+		if excludedMap[strings.ToLower(tok)] {
+			continue
+		}
+		if isTooShortKeyword(tok) || stopWords[strings.ToLower(tok)] {
+			continue
+		}
+		items = append(items, KeywordCount{Keyword: tok, Count: sum})
+		if len(items) >= topN {
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func trendsFromDB(db *sql.DB, postIDs []int) ([]TrendPoint, error) {
+	if len(postIDs) == 0 {
+		return nil, nil
+	}
+	args := make([]interface{}, 0, len(postIDs))
+	for _, id := range postIDs {
+		args = append(args, id)
+	}
+	q := `SELECT substr(created_at, 1, 10) AS d, COUNT(*) AS c FROM posts WHERE id IN (` + placeholders(len(postIDs)) + `) GROUP BY d ORDER BY d`
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []TrendPoint
+	for rows.Next() {
+		var d string
+		var c int
+		if err := rows.Scan(&d, &c); err != nil {
+			return nil, err
+		}
+		out = append(out, TrendPoint{Date: d, Count: c})
+	}
+	return out, rows.Err()
+}
+
+func replacePostTokens(db *sql.DB, postID int, freq map[string]int) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.Exec(`DELETE FROM post_tokens WHERE post_id = ?`, postID); err != nil {
+		return err
+	}
+	for tok, cnt := range freq {
+		if cnt <= 0 {
+			continue
+		}
+		if _, err := tx.Exec(`INSERT INTO post_tokens (post_id, token, cnt) VALUES (?, ?, ?)`, postID, tok, cnt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func analyzePost(db *sql.DB, nlpURL string, postID int, content string) error {
+	freq := keywordTokenCounts(content)
+	if err := replacePostTokens(db, postID, freq); err != nil {
+		return err
+	}
+
+	labels, err := classifyTexts(nlpURL, []string{content})
+	label := "neutral"
+	score := 0
+	if err != nil {
+		log.Printf("nlp classify failed for post %d: %v; using defaults", postID, err)
+	} else if len(labels) > 0 {
+		label = labels[0].Label
+		score = labels[0].Score
+	}
+
+	_, err = db.Exec(
+		`UPDATE posts SET sentiment_label = ?, sentiment_score = ?, nlp_version = ? WHERE id = ?`,
+		label, score, CurrentNLPVersion, postID,
+	)
+	return err
+}
+
+func columnExists(db *sql.DB, table, name string) (bool, error) {
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var cname, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &cname, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if strings.EqualFold(cname, name) {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 func setupDatabase(db *sql.DB) error {
-	_, err := db.Exec(`
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`PRAGMA journal_mode = WAL`); err != nil {
+		return err
+	}
+
+	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS posts (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			platform TEXT NOT NULL,
@@ -286,8 +350,53 @@ func setupDatabase(db *sql.DB) error {
 			content TEXT NOT NULL,
 			created_at TEXT NOT NULL
 		)
-	`)
-	return err
+	`); err != nil {
+		return err
+	}
+
+	migrations := []struct {
+		name string
+		sql  string
+	}{
+		{"sentiment_label", `ALTER TABLE posts ADD COLUMN sentiment_label TEXT DEFAULT 'neutral'`},
+		{"sentiment_score", `ALTER TABLE posts ADD COLUMN sentiment_score INTEGER DEFAULT 0`},
+		{"nlp_version", `ALTER TABLE posts ADD COLUMN nlp_version INTEGER DEFAULT 0`},
+	}
+	for _, m := range migrations {
+		ok, err := columnExists(db, "posts", m.name)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			if _, err := db.Exec(m.sql); err != nil {
+				return err
+			}
+		}
+	}
+
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS post_tokens (
+			post_id INTEGER NOT NULL,
+			token TEXT NOT NULL,
+			cnt INTEGER NOT NULL,
+			PRIMARY KEY (post_id, token),
+			FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
+		)
+	`); err != nil {
+		return err
+	}
+
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_posts_created_at ON posts(created_at)`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_post_tokens_token ON post_tokens(token)`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_post_tokens_post_id ON post_tokens(post_id)`); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload interface{}) {
@@ -308,6 +417,91 @@ func normalizeCreatedAt(value string) (string, error) {
 	return t.UTC().Format(time.RFC3339), nil
 }
 
+func runBackfill(db *sql.DB, nlpURL string) (int, error) {
+	type row struct {
+		id      int
+		content string
+	}
+	const batchSize = 64
+	processed := 0
+	lastID := 0
+
+	flush := func(batch []row) error {
+		if len(batch) == 0 {
+			return nil
+		}
+		texts := make([]string, len(batch))
+		for i, r := range batch {
+			texts[i] = r.content
+		}
+		labels, err := classifyTexts(nlpURL, texts)
+		if err != nil {
+			log.Printf("backfill batch nlp error: %v", err)
+			for _, r := range batch {
+				if err := replacePostTokens(db, r.id, keywordTokenCounts(r.content)); err != nil {
+					return err
+				}
+				if _, err := db.Exec(`UPDATE posts SET sentiment_label = ?, sentiment_score = ?, nlp_version = ? WHERE id = ?`,
+					"neutral", 0, CurrentNLPVersion, r.id); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		for i, r := range batch {
+			if err := replacePostTokens(db, r.id, keywordTokenCounts(r.content)); err != nil {
+				return err
+			}
+			label := "neutral"
+			score := 0
+			if i < len(labels) {
+				label = labels[i].Label
+				score = labels[i].Score
+			}
+			if _, err := db.Exec(`UPDATE posts SET sentiment_label = ?, sentiment_score = ?, nlp_version = ? WHERE id = ?`,
+				label, score, CurrentNLPVersion, r.id); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	for {
+		rows, err := db.Query(
+			`SELECT id, content FROM posts WHERE COALESCE(nlp_version, 0) < ? AND id > ? ORDER BY id LIMIT ?`,
+			CurrentNLPVersion, lastID, batchSize,
+		)
+		if err != nil {
+			return processed, err
+		}
+		var batch []row
+		for rows.Next() {
+			var r row
+			if err := rows.Scan(&r.id, &r.content); err != nil {
+				_ = rows.Close()
+				return processed, err
+			}
+			batch = append(batch, r)
+			lastID = r.id
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return processed, err
+		}
+		_ = rows.Close()
+
+		if len(batch) == 0 {
+			break
+		}
+		if err := flush(batch); err != nil {
+			return processed, err
+		}
+		processed += len(batch)
+	}
+
+	return processed, nil
+}
+
 func main() {
 	port := os.Getenv("STAT_PORT")
 	if port == "" {
@@ -317,6 +511,8 @@ func main() {
 	if sqlitePath == "" {
 		sqlitePath = "./listenai.db"
 	}
+	nlpURL := strings.TrimSpace(os.Getenv("NLP_URL"))
+
 	log.Printf("using SQLite database at %s", sqlitePath)
 
 	db, err := sql.Open("sqlite", sqlitePath)
@@ -365,12 +561,37 @@ func main() {
 			examplePosts = examplePosts[:exampleLimit]
 		}
 
+		ids := make([]int, len(posts))
+		for i := range posts {
+			ids[i] = posts[i].ID
+		}
+
+		topN := 10
+		topKW, err := topKeywordsFromDB(db, ids, req.ExcludeKeywords, topN)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if len(topKW) == 0 && len(posts) > 0 {
+			topKW = extractTopKeywords(posts, req.IncludeKeywords, req.ExcludeKeywords, topN)
+		}
+
+		trends, err := trendsFromDB(db, ids)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if len(trends) == 0 && len(posts) > 0 {
+			trends = buildTrendsFromPosts(posts)
+		}
+
 		resp := StatsResponse{
-			MentionCount: len(posts),
-			TopKeywords:  extractTopKeywords(posts, req.IncludeKeywords, req.ExcludeKeywords, 10),
-			Trends:       buildTrends(posts),
-			ExamplePosts: examplePosts,
-			Posts:        posts,
+			MentionCount:        len(posts),
+			TopKeywords:         topKW,
+			Trends:              trends,
+			ExamplePosts:        examplePosts,
+			SentimentPercentage: sentimentPercentages(posts),
+			TotalAnalyzedPosts:  len(posts),
 		}
 		writeJSON(w, http.StatusOK, resp)
 	})
@@ -403,7 +624,7 @@ func main() {
 		}
 
 		result, err := db.Exec(
-			`INSERT INTO posts (platform, author, content, created_at) VALUES (?, ?, ?, ?)`,
+			`INSERT INTO posts (platform, author, content, created_at, sentiment_label, sentiment_score, nlp_version) VALUES (?, ?, ?, ?, 'neutral', 0, 0)`,
 			req.Platform,
 			req.Author,
 			req.Content,
@@ -419,12 +640,34 @@ func main() {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to retrieve inserted id"})
 			return
 		}
+		postID := int(id64)
 
-		writeJSON(w, http.StatusCreated, InsertPostResponse{ID: int(id64)})
+		if err := analyzePost(db, nlpURL, postID, req.Content); err != nil {
+			log.Printf("analyze post %d: %v", postID, err)
+		}
+
+		writeJSON(w, http.StatusCreated, InsertPostResponse{ID: postID})
+	})
+
+	http.HandleFunc("/admin/backfill", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		if nlpURL == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "NLP_URL is not configured"})
+			return
+		}
+		n, err := runBackfill(db, nlpURL)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"updated_posts": n, "nlp_version": CurrentNLPVersion})
 	})
 
 	addr := ":" + port
-	log.Printf("stat service listening on %s", addr)
+	log.Printf("stat service listening on %s (NLP_URL=%q)", addr, nlpURL)
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		log.Fatalf("server failed: %v", err)
 	}
