@@ -9,7 +9,6 @@ dotenv.config();
 const app = express();
 const port = process.env.GATEWAY_PORT || 8000;
 const statUrl = process.env.STAT_URL || "http://localhost:8002";
-const nlpUrl = process.env.NLP_URL || "http://localhost:8001";
 const jwtSecret = process.env.JWT_SECRET || "supersecret";
 const demoUser = process.env.DEMO_USER || "admin";
 const demoPass = process.env.DEMO_PASS || "admin123";
@@ -69,27 +68,19 @@ app.post("/api/dashboard", authMiddleware, async (req, res) => {
     });
 
     const stats = statResp.data;
-    const posts = Array.isArray(stats.posts) ? stats.posts : [];
-    const texts = posts.map((p) => p.content);
-
-    const sentimentResp = await axios.post(`${nlpUrl}/sentiment`, { texts });
-    const sentimentData = sentimentResp.data;
-
-    const classifiedPosts = posts.map((post, idx) => ({
-      ...post,
-      sentiment: sentimentData.classifications?.[idx]?.label || "neutral",
-      sentiment_score: sentimentData.classifications?.[idx]?.score || 0,
+    const rawExamples = Array.isArray(stats.example_posts) ? stats.example_posts : [];
+    const examples = rawExamples.slice(0, sampleSize).map((p) => ({
+      ...p,
+      sentiment: p.sentiment || "neutral",
     }));
 
-    const examples = classifiedPosts.slice(0, sampleSize);
-
     return res.json({
-      sentimentPercentage: sentimentData.sentiment_percentage,
+      sentimentPercentage: stats.sentiment_percentage || {},
       topKeywords: stats.top_keywords || [],
       trends: stats.trends || [],
       examplePosts: examples,
       mentionCount: stats.mention_count || 0,
-      totalAnalyzedPosts: classifiedPosts.length,
+      totalAnalyzedPosts: stats.total_analyzed_posts ?? stats.mention_count ?? 0,
     });
   } catch (err) {
     const detail = err.response?.data || err.message;
