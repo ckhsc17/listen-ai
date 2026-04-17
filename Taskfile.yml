@@ -20,6 +20,7 @@ tasks:
     env:
       STAT_PORT: '{{default "8002" .STAT_PORT}}'
       SQLITE_PATH: '{{default "../data/listenai.db" .SQLITE_PATH}}'
+      NLP_URL: '{{default "http://localhost:8001" .NLP_URL}}'
     cmds:
     - go run .
 

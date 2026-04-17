@@ -17,6 +17,8 @@ WORKDIR /app
 COPY --from=builder /stat ./stat
 
 ENV STAT_PORT=8002
+# NLP_URL used for insert-time sentiment and /admin/backfill (docker-compose overrides host).
+ENV NLP_URL=http://nlp:8001
 # Default path inside the container; override with SQLITE_PATH. Persist /data via a volume (see docker-compose).
 ENV SQLITE_PATH=/data/listenai.db
 
