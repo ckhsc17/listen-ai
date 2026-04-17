@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import re
 import sqlite3
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 
@@ -36,7 +39,25 @@ def parse_args() -> argparse.Namespace:
         default="x",
         help="Platform value for inserted rows (default: x)",
     )
+    parser.add_argument(
+        "--stat-url",
+        default="http://localhost:8002",
+        help="stat service base URL for --backfill (default: http://localhost:8002)",
+    )
+    parser.add_argument(
+        "--backfill",
+        action="store_true",
+        help="After import, POST /admin/backfill on stat (requires stat + NLP with NLP_URL set)",
+    )
     return parser.parse_args()
+
+
+def column_exists(conn: sqlite3.Connection, table: str, name: str) -> bool:
+    cur = conn.execute(f"PRAGMA table_info({table})")
+    for _cid, cname, _ctype, _notnull, _dflt, _pk in cur.fetchall():
+        if cname == name:
+            return True
+    return False
 
 
 def ensure_posts_table(conn: sqlite3.Connection) -> None:
@@ -51,6 +72,26 @@ def ensure_posts_table(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    migrations = [
+        ("sentiment_label", "ALTER TABLE posts ADD COLUMN sentiment_label TEXT DEFAULT 'neutral'"),
+        ("sentiment_score", "ALTER TABLE posts ADD COLUMN sentiment_score INTEGER DEFAULT 0"),
+        ("nlp_version", "ALTER TABLE posts ADD COLUMN nlp_version INTEGER DEFAULT 0"),
+    ]
+    for col, ddl in migrations:
+        if not column_exists(conn, "posts", col):
+            conn.execute(ddl)
+
+
+def trigger_stat_backfill(stat_url: str, timeout_s: int = 7200) -> dict:
+    url = stat_url.rstrip("/") + "/admin/backfill"
+    req = urllib.request.Request(url, data=b"{}", method="POST", headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            body = resp.read().decode("utf-8")
+            return json.loads(body) if body else {}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8")
+        raise RuntimeError(f"backfill HTTP {exc.code}: {raw}") from exc
 
 
 def download_csv_with_gdown(drive_url: str, output_csv: Path) -> None:
@@ -111,8 +152,8 @@ def import_posts(db_path: Path, csv_path: Path, platform: str) -> dict[str, int]
 
                 conn.execute(
                     """
-                    INSERT INTO posts(platform, author, content, created_at)
-                    VALUES(?, ?, ?, ?)
+                    INSERT INTO posts(platform, author, content, created_at, sentiment_label, sentiment_score, nlp_version)
+                    VALUES(?, ?, ?, ?, 'neutral', 0, 0)
                     """,
                     (platform, author, content, created_at),
                 )
@@ -141,13 +182,20 @@ def main() -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    print(
-        {
-            "db": str(db_path),
-            "csv": str(csv_path),
-            **result,
-        }
-    )
+    out = {
+        "db": str(db_path),
+        "csv": str(csv_path),
+        **result,
+    }
+    if args.backfill:
+        try:
+            bf = trigger_stat_backfill(args.stat_url)
+            out["backfill"] = bf
+        except Exception as exc:  # noqa: BLE001
+            print(f"Error: backfill failed: {exc}", file=sys.stderr)
+            return 1
+
+    print(out)
     return 0
 
 
